@@ -1,0 +1,116 @@
+# macOS System Files
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon
+._*
+.DocumentRevisions-V100
+.fseventsd
+.Spotlight-V100
+.TemporaryItems
+.Trashes
+.VolumeIcon.icns
+.com.apple.timemachine.donotpresent
+.AppleDB
+.AppleDesktop
+Network Trash Folder
+Temporary Items
+.apdisk
+
+# Editor and IDE Files
+# Visual Studio Code
+.vscode/
+*.code-workspace
+
+# IntelliJ IDEA / JetBrains
+.idea/
+*.iml
+*.iws
+*.ipr
+
+# Vim
+*.swp
+*.swo
+*.swn
+*.vim
+.*.sw[a-z]
+Session.vim
+.netrwhist
+tags
+
+# Emacs
+*~
+\#*\#
+.\#*
+.emacs.desktop
+.emacs.desktop.lock
+*.elc
+auto-save-list
+tramp
+
+# Sublime Text
+*.sublime-workspace
+*.sublime-project
+
+# TextMate
+*.tmproj
+*.tmproject
+tmtags
+
+# General Editor Backups
+*.bak
+*.backup
+*.tmp
+*.temp
+*.orig
+
+# Shell Script Development
+# Test outputs
+test-output/
+*.log
+*.out
+*.err
+
+# Coverage reports
+coverage/
+.coverage
+
+# Temporary files
+tmp/
+temp/
+*.pid
+*.seed
+*.pid.lock
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Build artifacts (if any future build process is added)
+build/
+dist/
+*.tar.gz
+*.zip
+
+# Documentation build outputs
+docs/_build/
+docs/.doctrees/
+*.pdf
+
+# Python (if any Python tooling is added)
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+ENV/
+
+# Security and Credentials
+*.pem
+*.key
+*.crt
+*.p12
+.secrets/
+credentials/
