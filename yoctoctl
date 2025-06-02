@@ -1,0 +1,816 @@
+#!/usr/bin/env bash
+
+# MIT License
+#
+# Copyright (c) 2025 Anastasios Kaltakis
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in all
+# copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
+
+# =============================================================================
+#                   YOCTOCTL - Yocto Container Manager
+# =============================================================================
+# Container orchestration system for managing Poky CROPS 
+# development environments on Apple Silicon macOS platforms.
+#
+# Features:
+#   • Automated container lifecycle management
+#   • Network infrastructure configuration for SMB access
+#   • Interactive and command-line interfaces
+#   • Real-time environment health monitoring
+#   • Professional UI powered by Charm's gum
+#
+# Author:  Anastasios Kaltakis
+# GitHub:  https://github.com/anaskalt/yoctoctl
+# Version: 1.0.0
+# =============================================================================
+
+set -euo pipefail
+
+# -----------------------------------------------------------------------------
+# Global Configuration and Constants
+# -----------------------------------------------------------------------------
+
+readonly SCRIPT_NAME="yoctoctl"
+readonly SCRIPT_VERSION="1.0.0"
+readonly SCRIPT_AUTHOR="Anastasios Kaltakis"
+readonly SCRIPT_GITHUB="https://github.com/anaskalt/yoctoctl"
+
+# Container infrastructure
+readonly FILESERVER_CONTAINER="yocto-fileserver"
+readonly BUILDER_CONTAINER="yocto-builder"
+readonly WORKSPACE_VOLUME="yocto-workspace"
+
+# Network configuration
+readonly SMB_ENDPOINT="127.0.0.2"
+readonly SMB_PORT="445"
+readonly LOOPBACK_INTERFACE="lo0"
+
+# Professional color palette - Muted enterprise theme
+readonly COLOR_PRIMARY="#6B8CAE"      # Muted Steel Blue
+readonly COLOR_ACCENT="#7EA885"       # Sage Green
+readonly COLOR_SUCCESS="#7EA885"      # Sage Green
+readonly COLOR_WARNING="#D4A574"      # Muted Gold
+readonly COLOR_ERROR="#B87B7B"        # Dusty Rose
+readonly COLOR_INFO="#8FA4B8"         # Powder Blue
+readonly COLOR_MUTED="#9B9B9B"        # Neutral Gray
+readonly COLOR_DARK="#4A5F7A"         # Deep Blue Gray
+
+# -----------------------------------------------------------------------------
+# ASCII Art Banner
+# -----------------------------------------------------------------------------
+
+readonly ASCII_BANNER='
+ __   _____   ____ _____ ___   ____ _____ _     
+ \ \ / / _ \ / ___|_   _/ _ \ / ___|_   _| |    
+  \ V / | | | |     | || | | | |     | | | |    
+   | || |_| | |___  | || |_| | |___  | | | |___ 
+   |_| \___/ \____| |_| \___/ \____| |_| |_____|
+                                                
+     Yocto Container Manager for Poky CROPS     
+    
+'
+
+# -----------------------------------------------------------------------------
+# Error Handling and Utility Functions
+# -----------------------------------------------------------------------------
+
+# Enhanced error handler with contextual debugging information
+handle_error() {
+    local exit_code=$?
+    local line_number="${1:-unknown}"
+    local function_name="${2:-main}"
+    
+    trap - ERR
+    
+    gum log --level error "Operation failed" \
+        function "$function_name" \
+        line "$line_number" \
+        code "$exit_code"
+    
+    exit "${exit_code}"
+}
+
+# Install comprehensive error trapping
+trap 'handle_error ${LINENO} ${FUNCNAME:-main}' ERR
+
+# Ensure terminal restoration on exit
+trap 'printf "\033[?25h\033[0m"' EXIT
+
+# Display application banner with ASCII art
+show_banner() {
+    gum style \
+        --foreground "$COLOR_PRIMARY" \
+        --align center \
+        "$ASCII_BANNER"
+}
+
+# Verify Docker installation and daemon status
+check_docker() {
+    if ! command -v docker &> /dev/null; then
+        gum log --level error "Docker is not installed or not in PATH"
+        gum style --foreground "$COLOR_INFO" \
+            "Install Docker Desktop: https://docker.com/products/docker-desktop"
+        exit 1
+    fi
+    
+    if ! docker info &> /dev/null; then
+        gum log --level error "Docker daemon is not running"
+        gum style --foreground "$COLOR_INFO" "Please start Docker Desktop"
+        exit 1
+    fi
+}
+
+# Verify gum installation for UI components
+check_gum() {
+    if ! command -v gum &> /dev/null; then
+        echo "Error: gum is not installed"
+        echo "Install with: brew install gum"
+        exit 1
+    fi
+}
+
+# -----------------------------------------------------------------------------
+# Network Management Functions
+# -----------------------------------------------------------------------------
+
+# Configure network alias for SMB connectivity
+configure_network() {
+    if ifconfig "$LOOPBACK_INTERFACE" 2>/dev/null | grep -q "$SMB_ENDPOINT"; then
+        # Already configured
+        return 0
+    fi
+    
+    if gum spin --spinner dot \
+        --title "Configuring network infrastructure..." \
+        -- sudo ifconfig "$LOOPBACK_INTERFACE" "$SMB_ENDPOINT" alias up; then
+        
+        sleep 1
+        if ifconfig "$LOOPBACK_INTERFACE" 2>/dev/null | grep -q "$SMB_ENDPOINT"; then
+            return 0
+        fi
+    fi
+    
+    return 1
+}
+
+# Analyze network connectivity status
+check_network_status() {
+    local status="inactive"
+    local port_status="unreachable"
+    
+    if ifconfig "$LOOPBACK_INTERFACE" 2>/dev/null | grep -q "$SMB_ENDPOINT"; then
+        status="active"
+        
+        if command -v nc &> /dev/null && nc -z "$SMB_ENDPOINT" "$SMB_PORT" 2>/dev/null; then
+            port_status="accessible"
+        fi
+    fi
+    
+    echo "${status}:${port_status}"
+}
+
+# -----------------------------------------------------------------------------
+# Container Management Functions
+# -----------------------------------------------------------------------------
+
+# Retrieve detailed container status with health information
+get_container_status() {
+    local container="$1"
+    local status
+    
+    status=$(docker inspect -f '{{.State.Status}}' "$container" 2>/dev/null || echo "missing")
+    
+    if [[ "$status" == "running" ]]; then
+        local started
+        started=$(docker inspect -f '{{.State.StartedAt}}' "$container" 2>/dev/null | cut -d'T' -f1)
+        echo "${status}:${started}"
+    else
+        echo "${status}:"
+    fi
+}
+
+# Start containers with progress indication
+start_containers() {
+    local containers=("$FILESERVER_CONTAINER" "$BUILDER_CONTAINER")
+    local failed=0
+    
+    for container in "${containers[@]}"; do
+        local status
+        status=$(docker inspect -f '{{.State.Status}}' "$container" 2>/dev/null || echo "missing")
+        
+        if [[ "$status" == "running" ]]; then
+            # Container already running - skip silently
+            continue
+        elif [[ "$status" == "missing" ]]; then
+            # Container missing - count as failure
+            ((failed++))
+        else
+            if gum spin --spinner dot \
+                --title "Starting $container..." \
+                -- docker start "$container" &> /dev/null; then
+                # Started successfully
+                :
+            else
+                ((failed++))
+            fi
+        fi
+    done
+    
+    return $failed
+}
+
+# Gracefully stop running containers
+stop_containers() {
+    local containers=("$BUILDER_CONTAINER" "$FILESERVER_CONTAINER")
+    local stopped=0
+    
+    for container in "${containers[@]}"; do
+        if docker ps -q -f "name=$container" | grep -q .; then
+            if gum spin --spinner dot \
+                --title "Stopping $container..." \
+                -- docker stop "$container" &> /dev/null; then
+                ((stopped++))
+            fi
+        fi
+    done
+    
+    echo "$stopped"
+}
+
+# Wait for file server initialization
+wait_for_fileserver() {
+    local timeout=30
+    local elapsed=0
+    
+    while [[ $elapsed -lt $timeout ]]; do
+        if docker logs "$FILESERVER_CONTAINER" 2>&1 | grep -q "STATUS=daemon 'smbd' finished starting up and ready to serve connections"; then
+            return 0
+        fi
+        sleep 1
+        ((elapsed++))
+    done
+    
+    return 1
+}
+
+# -----------------------------------------------------------------------------
+# Storage Analysis Functions
+# -----------------------------------------------------------------------------
+
+# Analyze storage volume usage and contents
+analyze_storage() {
+    if ! docker volume inspect "$WORKSPACE_VOLUME" &> /dev/null; then
+        echo "missing:0:0:0:0:0"
+        return
+    fi
+    
+    if docker ps -q -f "name=$BUILDER_CONTAINER" | grep -q .; then
+        local size_info
+        size_info=$(docker exec "$BUILDER_CONTAINER" df -h /workdir 2>/dev/null | tail -1)
+        
+        if [[ -n "$size_info" ]]; then
+            local total=$(echo "$size_info" | awk '{print $2}')
+            local used=$(echo "$size_info" | awk '{print $3}')
+            local percent=$(echo "$size_info" | awk '{print $5}')
+            
+            local counts
+            counts=$(docker exec "$BUILDER_CONTAINER" bash -c '
+                files=$(find /workdir -type f 2>/dev/null | wc -l)
+                dirs=$(find /workdir -type d 2>/dev/null | wc -l)
+                echo "${files}:${dirs}"
+            ' 2>/dev/null || echo "0:0")
+            
+            echo "active:${total}:${used}:${percent}:${counts}"
+            return
+        fi
+    fi
+    
+    echo "active:unknown:unknown:unknown:0:0"
+}
+
+# -----------------------------------------------------------------------------
+# Command Implementation Functions
+# -----------------------------------------------------------------------------
+
+# Display comprehensive environment status report
+cmd_status() {
+    show_banner
+    
+    gum style \
+        --foreground "$COLOR_DARK" \
+        --bold \
+        --align center \
+        "INFRASTRUCTURE STATUS REPORT"
+    
+    echo ""
+    echo ""
+    
+    # Network Configuration Section
+    gum style --foreground "$COLOR_DARK" --bold "Network Configuration"
+    echo ""
+    
+    local network_status
+    network_status=$(check_network_status)
+    local net_state="${network_status%%:*}"
+    local port_state="${network_status##*:}"
+    
+    printf "  %-24s : " "Endpoint Address"
+    if [[ "$net_state" == "active" ]]; then
+        gum style --foreground "$COLOR_SUCCESS" "$SMB_ENDPOINT [Active]"
+    else
+        gum style --foreground "$COLOR_ERROR" "$SMB_ENDPOINT [Inactive]"
+    fi
+    
+    printf "  %-24s : " "SMB Port Status"
+    if [[ "$port_state" == "accessible" ]]; then
+        gum style --foreground "$COLOR_SUCCESS" "Port $SMB_PORT [Accessible]"
+    else
+        gum style --foreground "$COLOR_WARNING" "Port $SMB_PORT [Unreachable]"
+    fi
+    
+    echo ""
+    echo ""
+    
+    # Container Infrastructure Section
+    gum style --foreground "$COLOR_DARK" --bold "Container Infrastructure"
+    echo ""
+    
+    for container_def in \
+        "$FILESERVER_CONTAINER:File Server:SMB file sharing service" \
+        "$BUILDER_CONTAINER:Build Engine:Yocto compilation environment"; do
+        
+        IFS=':' read -r container display desc <<< "$container_def"
+        local status_info
+        status_info=$(get_container_status "$container")
+        local status="${status_info%%:*}"
+        local since="${status_info##*:}"
+        
+        printf "  %-24s : " "$display"
+        
+        case "$status" in
+            running)
+                gum style --foreground "$COLOR_SUCCESS" "● Running (since $since)"
+                ;;
+            stopped|exited)
+                gum style --foreground "$COLOR_WARNING" "○ Stopped"
+                ;;
+            missing)
+                gum style --foreground "$COLOR_ERROR" "✗ Not Deployed"
+                ;;
+            *)
+                gum style --foreground "$COLOR_MUTED" "◌ Unknown"
+                ;;
+        esac
+        
+        printf "  %-24s   %s\n" "" "$(gum style --foreground "$COLOR_MUTED" "$desc")"
+    done
+    
+    echo ""
+    echo ""
+    
+    # Storage Infrastructure Section
+    gum style --foreground "$COLOR_DARK" --bold "Storage Infrastructure"
+    echo ""
+    
+    local storage_info
+    storage_info=$(analyze_storage)
+    IFS=':' read -r vol_status total used percent files dirs <<< "$storage_info"
+    
+    printf "  %-24s : " "Workspace Volume"
+    if [[ "$vol_status" == "missing" ]]; then
+        gum style --foreground "$COLOR_ERROR" "✗ Not Created"
+    else
+        gum style --foreground "$COLOR_SUCCESS" "● Operational"
+        if [[ "$total" != "unknown" ]]; then
+            printf "  %-24s   %s\n" "" \
+                "$(gum style --foreground "$COLOR_MUTED" "Capacity: $total | Used: $used ($percent)")"
+            if [[ "$files" != "0" ]] || [[ "$dirs" != "0" ]]; then
+                printf "  %-24s   %s\n" "" \
+                    "$(gum style --foreground "$COLOR_MUTED" "Contents: $files files, $dirs directories")"
+            fi
+        fi
+    fi
+    
+    echo ""
+    echo ""
+    
+    # Environment Summary
+    gum style --foreground "$COLOR_DARK" --bold "Environment Summary"
+    echo ""
+    
+    if docker ps -q -f "name=yocto-" | grep -q .; then
+        gum style --foreground "$COLOR_SUCCESS" "  ✓ Environment Operational"
+        echo ""
+        gum style --foreground "$COLOR_INFO" "  Access Methods:"
+        printf "    %-20s : %s\n" "Development Shell" "$SCRIPT_NAME shell"
+        printf "    %-20s : %s\n" "File System" "smb://$SMB_ENDPOINT/workdir"
+        printf "    %-20s : %s\n" "macOS Finder" "⌘+K → smb://$SMB_ENDPOINT/workdir"
+    else
+        gum style --foreground "$COLOR_WARNING" "  ⚠ Environment Requires Initialization"
+        echo ""
+        printf "    %s\n" "$(gum style --foreground "$COLOR_MUTED" "Initialize with: $SCRIPT_NAME start")"
+    fi
+}
+
+# Initialize environment with comprehensive orchestration
+cmd_start() {
+    show_banner
+    
+    gum style \
+        --foreground "$COLOR_DARK" \
+        --bold \
+        --align center \
+        "ENVIRONMENT INITIALIZATION"
+    
+    echo ""
+    echo ""
+    
+    # Phase 1: Network Configuration
+    gum style --foreground "$COLOR_INFO" "[1/3] Network Configuration"
+    if configure_network; then
+        gum style --foreground "$COLOR_SUCCESS" "  ✓ Network interface configured"
+    else
+        gum style --foreground "$COLOR_ERROR" "  ✗ Network configuration failed"
+        return 1
+    fi
+    
+    echo ""
+    
+    # Phase 2: Container Startup
+    gum style --foreground "$COLOR_INFO" "[2/3] Container Startup"
+    local failed
+    failed=$(start_containers)
+    
+    if [[ $failed -eq 0 ]]; then
+        gum style --foreground "$COLOR_SUCCESS" "  ✓ All containers started"
+    else
+        gum style --foreground "$COLOR_WARNING" "  ⚠ Some containers failed"
+    fi
+    
+    echo ""
+    
+    # Phase 3: Service Verification
+    gum style --foreground "$COLOR_INFO" "[3/3] Service Verification"
+    
+    if gum spin --spinner dot \
+        --title "Waiting for file server..." \
+        -- bash -c "wait_for_fileserver"; then
+        gum style --foreground "$COLOR_SUCCESS" "  ✓ File server ready"
+    else
+        gum style --foreground "$COLOR_WARNING" "  ⚠ File server timeout"
+    fi
+    
+    if nc -z "$SMB_ENDPOINT" "$SMB_PORT" 2>/dev/null; then
+        gum style --foreground "$COLOR_SUCCESS" "  ✓ SMB service accessible"
+    else
+        gum style --foreground "$COLOR_WARNING" "  ⚠ SMB service not responding"
+    fi
+    
+    echo ""
+    echo ""
+    
+    # Completion Summary
+    gum style --foreground "$COLOR_SUCCESS" --bold --align center \
+        "✓ ENVIRONMENT READY"
+    
+    echo ""
+    gum style --foreground "$COLOR_INFO" --align center "Quick Start:"
+    echo ""
+    printf "  %s : %s\n" \
+        "$(gum style --foreground "$COLOR_MUTED" "Connect to shell")" \
+        "$SCRIPT_NAME shell"
+    printf "  %s : %s\n" \
+        "$(gum style --foreground "$COLOR_MUTED" "Mount in Finder")" \
+        "⌘+K → smb://$SMB_ENDPOINT/workdir"
+}
+
+# Connect to development shell environment
+cmd_shell() {
+    if ! docker ps -q -f "name=$BUILDER_CONTAINER" | grep -q .; then
+        gum style --foreground "$COLOR_WARNING" "Build container not running"
+        
+        if gum confirm "Start the environment?"; then
+            cmd_start
+            echo ""
+        else
+            return 1
+        fi
+    fi
+    
+    gum style \
+        --foreground "$COLOR_INFO" \
+        --align center \
+        "Connecting to Poky Development Environment"
+    
+    sleep 0.5
+    
+    echo ""
+    gum style --foreground "$COLOR_MUTED" --align center \
+        "Working directory: /workdir | Exit: Ctrl+D"
+    echo ""
+
+    sleep 2
+    
+    docker exec -it "$BUILDER_CONTAINER" bash -c '
+        export PS1="\[\e[38;5;245m\][\[\e[38;5;67m\]poky\[\e[38;5;245m\]]\[\e[0m\] \[\e[38;5;109m\]\w\[\e[0m\] \[\e[38;5;245m\]>\[\e[0m\] "
+        export HISTSIZE=10000
+        export HISTFILESIZE=20000
+        export HISTCONTROL=ignoredups:erasedups
+        
+        cd /workdir
+        clear
+        
+        echo -e "\e[38;5;67m Yocto Development Environment\e[0m"
+        echo -e "\e[38;5;245m ────────────────────────────\e[0m"
+        echo
+        echo -e "\e[38;5;109mWorkspace:\e[0m"
+        echo "  • shared/downloads/     - Package cache"
+        echo "  • shared/sstate-cache/  - Build state cache"
+        echo "  • shared/ccache/        - Compiler cache"
+        echo "  • documentation/        - Project documentation"
+        echo
+        echo -e "\e[38;5;109mQuick Start:\e[0m"
+        echo -e "  1. Create project directory"
+        echo -e "     \e[38;5;245mmkdir -p yocto && cd yocto\e[0m"
+        echo
+        echo -e "  2. Clone Poky repository"
+        echo -e "     \e[38;5;245mgit clone -b scarthgap git://git.yoctoproject.org/poky\e[0m"
+        echo
+        echo -e "  3. Initialize build environment"
+        echo -e "     \e[38;5;245mcd poky && source oe-init-build-env\e[0m"
+        echo
+        echo -e "  4. Build minimal image"
+        echo -e "     \e[38;5;245mbitbake core-image-minimal\e[0m"
+        echo
+        
+        exec bash -l
+    '
+}
+
+# Perform graceful environment shutdown
+cmd_shutdown() {
+    show_banner
+    
+    gum style \
+        --foreground "$COLOR_DARK" \
+        --bold \
+        --align center \
+        "ENVIRONMENT SHUTDOWN"
+    
+    echo ""
+    echo ""
+    
+    gum style --foreground "$COLOR_MUTED" --align center \
+        "This will stop all running containers." \
+        "Your data will be preserved in volumes."
+    
+    echo ""
+    
+    if ! gum confirm "Proceed with shutdown?"; then
+        # User cancelled - exit silently
+        return 0
+    fi
+    
+    echo ""
+    
+    local stopped
+    stopped=$(stop_containers)
+    
+    echo ""
+    
+    gum style --foreground "$COLOR_SUCCESS" --bold --align center \
+        "✓ SHUTDOWN COMPLETE"
+    
+    echo ""
+    printf "  %-24s : %s\n" "Containers stopped" "$stopped"
+    printf "  %-24s : %s\n" "Data status" "Preserved in volumes"
+    printf "  %-24s : %s\n" "Network alias" "Remains active"
+    echo ""
+    gum style --foreground "$COLOR_MUTED" --align center \
+        "Restart with: $SCRIPT_NAME start"
+}
+
+# Display concise help documentation
+cmd_help() {
+    show_banner
+    
+    gum style \
+        --foreground "$COLOR_DARK" \
+        --bold \
+        --align center \
+        "COMMAND REFERENCE"
+    
+    echo ""
+    
+    gum style --foreground "$COLOR_MUTED" "Usage:"
+    echo "  $SCRIPT_NAME [command]"
+    echo ""
+    
+    gum style --foreground "$COLOR_DARK" --bold "Available Commands:"
+    echo ""
+    
+    # Define commands with proper spacing for alignment
+    local -a commands=(
+        "status:Display comprehensive environment status"
+        "start:Initialize and start Yocto containers"
+        "shell:Connect to Poky development container"
+        "shutdown:Stop all containers gracefully"
+        "version:Display version information"
+        "help:Show this help message"
+    )
+    
+    # Display commands with consistent alignment
+    for cmd_info in "${commands[@]}"; do
+        IFS=':' read -r cmd desc <<< "$cmd_info"
+        # Use printf with fixed width for command name, then print colored version
+        printf "  %-15s" "$cmd"
+        # Move cursor back and print colored command over the plain text
+        printf "\r  %s" "$(gum style --foreground "$COLOR_PRIMARY" "$cmd")"
+        # Print description at the correct position
+        printf "%*s%s\n" $((15 - ${#cmd})) "" "$desc"
+    done
+    
+    echo ""
+    gum style --foreground "$COLOR_INFO" --italic --align center \
+        "Run $SCRIPT_NAME without arguments for interactive mode"
+}
+
+# Display version information
+cmd_version() {
+    show_banner
+    
+    gum style \
+        --foreground "$COLOR_ACCENT" \
+        --bold \
+        --align center \
+        --border double \
+        --border-foreground "$COLOR_ACCENT" \
+        --padding "2 4" \
+        --margin "1 2" \
+        "Version $SCRIPT_VERSION" \
+        "" \
+        "Yocto Container Manager" \
+        "for Poky CROPS" \
+        "" \
+        "Author" \
+        "$SCRIPT_AUTHOR" \
+        "" \
+        "Repository" \
+        "$SCRIPT_GITHUB" \
+        "" \
+        "Built with ❤️ and Charm Gum"
+}
+
+# Interactive menu system with continuous operation loop
+cmd_interactive() {
+    while true; do
+        clear
+        show_banner
+        
+        # Environment status check
+        local running=0
+        docker ps -q -f "name=$FILESERVER_CONTAINER" | grep -q . && ((running++)) || true
+        docker ps -q -f "name=$BUILDER_CONTAINER" | grep -q . && ((running++)) || true
+        
+        local status_msg="Environment Stopped"
+        local status_color="$COLOR_ERROR"
+        
+        if [[ $running -eq 2 ]]; then
+            status_msg="All Systems Operational"
+            status_color="$COLOR_SUCCESS"
+        elif [[ $running -eq 1 ]]; then
+            status_msg="Partial Operation"
+            status_color="$COLOR_WARNING"
+        fi
+        
+        gum style \
+            --foreground "$status_color" \
+            --align center \
+            --bold \
+            "$status_msg"
+        
+        echo ""
+        
+        # Menu selection
+        local choice
+        choice=$(gum choose \
+            --cursor.foreground "$COLOR_PRIMARY" \
+            --selected.foreground "$COLOR_PRIMARY" \
+            --selected.bold \
+            --header "Select Operation:" \
+            --header.foreground "$COLOR_DARK" \
+            --header.bold \
+            "View Status" \
+            "Start Environment" \
+            "Development Shell" \
+            "Shutdown Environment" \
+            "Help" \
+            "Version" \
+            "Exit")
+        
+        case "$choice" in
+            "View Status")
+                clear
+                cmd_status
+                echo ""
+                gum input --placeholder "Press Enter to continue..."
+                ;;
+            "Start Environment")
+                clear
+                cmd_start
+                echo ""
+                gum input --placeholder "Press Enter to continue..."
+                ;;
+            "Development Shell")
+                clear
+                cmd_shell
+                ;;
+            "Shutdown Environment")
+                clear
+                cmd_shutdown
+                echo ""
+                gum input --placeholder "Press Enter to continue..."
+                ;;
+            "Help")
+                clear
+                cmd_help
+                echo ""
+                gum input --placeholder "Press Enter to continue..."
+                ;;
+            "Version")
+                clear
+                cmd_version
+                echo ""
+                gum input --placeholder "Press Enter to continue..."
+                ;;
+            "Exit")
+                echo ""
+                gum style --foreground "$COLOR_INFO" --align center \
+                    "Thank you for using $SCRIPT_NAME"
+                exit 0
+                ;;
+        esac
+    done
+}
+
+# -----------------------------------------------------------------------------
+# Main Entry Point
+# -----------------------------------------------------------------------------
+
+# Main program entry point with command dispatch
+main() {
+    # Verify critical dependencies
+    check_gum
+    check_docker
+    
+    # Command dispatch with default to interactive mode
+    case "${1:-interactive}" in
+        interactive)
+            cmd_interactive
+            ;;
+        status)
+            cmd_status
+            ;;
+        start)
+            cmd_start
+            ;;
+        shell)
+            cmd_shell
+            ;;
+        shutdown|stop)
+            cmd_shutdown
+            ;;
+        help|--help|-h)
+            cmd_help
+            ;;
+        version|--version|-v)
+            cmd_version
+            ;;
+        *)
+            gum log --level error "Unknown command: ${1}"
+            echo ""
+            gum style --foreground "$COLOR_MUTED" \
+                "Run '$SCRIPT_NAME help' for usage information"
+            exit 1
+            ;;
+    esac
+}
+
+# Execute main program
+main "$@"
