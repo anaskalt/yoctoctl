@@ -527,7 +527,7 @@ cmd_shell() {
 
     sleep 2
     
-    docker exec -it "$BUILDER_CONTAINER" bash -c '
+    docker exec -it --user pokyuser "$BUILDER_CONTAINER" bash -c '
         export PS1="\[\e[38;5;245m\][\[\e[38;5;67m\]poky\[\e[38;5;245m\]]\[\e[0m\] \[\e[38;5;109m\]\w\[\e[0m\] \[\e[38;5;245m\]>\[\e[0m\] "
         export HISTSIZE=10000
         export HISTFILESIZE=20000
