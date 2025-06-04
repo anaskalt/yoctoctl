@@ -41,10 +41,10 @@ docker --version
 
 ```bash
 # Download the latest release
-curl -L https://raw.githubusercontent.com/anaskalt/yoctoctl/main/yoctoctl -o /usr/local/bin/yoctoctl
+sudo curl -L https://raw.githubusercontent.com/anaskalt/yoctoctl/main/yoctoctl -o /usr/local/bin/yoctoctl
 
 # Make executable
-chmod +x /usr/local/bin/yoctoctl
+sudo chmod +x /usr/local/bin/yoctoctl
 
 # Verify installation
 yoctoctl version
@@ -125,7 +125,7 @@ sudo ifconfig lo0 -alias 127.0.0.2
 **Permission denied on script execution**
 ```bash
 # Ensure proper permissions
-chmod +x /usr/local/bin/yoctoctl
+sudo chmod +x /usr/local/bin/yoctoctl
 ```
 
 ## Contributing
